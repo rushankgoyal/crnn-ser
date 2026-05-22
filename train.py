@@ -58,7 +58,28 @@ def build_model(cfg: dict) -> AnisotropicCRNN:
     )
 
 
-def run_epoch(model, loader, optimizer, device, train: bool):
+def spec_augment(spec: torch.Tensor, cfg: dict) -> torch.Tensor:
+    """Apply SpecAugment (freq + time masking) to a single spectrogram [1, 1, F, T]."""
+    F_bins = spec.shape[2]
+    T_bins = spec.shape[3]
+    freq_mask_max = cfg.get("freq_mask_max", 20)
+    time_mask_max = cfg.get("time_mask_max", 50)
+    n_freq = cfg.get("n_freq_masks", 2)
+    n_time = cfg.get("n_time_masks", 2)
+
+    out = spec.clone()
+    for _ in range(n_freq):
+        f = torch.randint(0, freq_mask_max + 1, (1,)).item()
+        f0 = torch.randint(0, max(1, F_bins - f), (1,)).item()
+        out[:, :, f0:f0 + f, :] = 0.0
+    for _ in range(n_time):
+        t = torch.randint(0, min(time_mask_max + 1, T_bins), (1,)).item()
+        t0 = torch.randint(0, max(1, T_bins - t), (1,)).item()
+        out[:, :, :, t0:t0 + t] = 0.0
+    return out
+
+
+def run_epoch(model, loader, optimizer, device, train: bool, augment_cfg: dict = None):
     model.train(train)
     total_loss = 0.0
     all_preds, all_labels = [], []
@@ -67,11 +88,14 @@ def run_epoch(model, loader, optimizer, device, train: bool):
         spec = spec.to(device)    # [1, 1, 128, T]
         label = label.to(device)  # [1]
 
+        if train and augment_cfg:
+            spec = spec_augment(spec, augment_cfg)
+
         logits = model(spec).squeeze(0)   # [T, C]
         T = logits.shape[0]
         targets = label.expand(T)         # [T]
 
-        loss = F.cross_entropy(logits, targets)
+        loss = F.cross_entropy(logits, targets, label_smoothing=0.1)
 
         if train:
             optimizer.zero_grad()
@@ -94,6 +118,7 @@ def train(cfg_path: str):
     data_root = cfg["data_root"]
     t_cfg = cfg["train"]
 
+    augment_cfg = cfg.get("augment", None)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
@@ -122,7 +147,7 @@ def train(cfg_path: str):
 
     best_uar = 0.0
     for epoch in range(1, t_cfg["epochs"] + 1):
-        train_loss, train_uar = run_epoch(model, train_loader, optimizer, device, train=True)
+        train_loss, train_uar = run_epoch(model, train_loader, optimizer, device, train=True, augment_cfg=augment_cfg)
         val_loss, val_uar = run_epoch(model, val_loader, optimizer, device, train=False)
         scheduler.step(val_uar)
 

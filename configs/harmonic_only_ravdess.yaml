@@ -12,7 +12,7 @@ model:
   kernel_freq: 32
   lstm_hidden: 128
   lstm_layers: 1
-  dropout: 0.3
+  dropout: 0.5
   use_harmonic_block: true
   harmonic_out_ch: 8
   dilation_mode: octave   # or empirical
@@ -25,3 +25,8 @@ train:
   weight_decay: 0.0001
   val_fraction: 0.1
   test_fraction: 0.1
+augment:
+  freq_mask_max: 20
+  time_mask_max: 50
+  n_freq_masks: 2
+  n_time_masks: 2

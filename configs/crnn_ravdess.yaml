@@ -12,10 +12,15 @@ model:
   kernel_freq: 32
   lstm_hidden: 128
   lstm_layers: 1
-  dropout: 0.3
+  dropout: 0.5
 train:
   epochs: 50
   lr: 0.001
-  weight_decay: 0.0001
+  weight_decay: 0.001
   val_fraction: 0.1
   test_fraction: 0.1
+augment:
+  freq_mask_max: 20
+  time_mask_max: 50
+  n_freq_masks: 2
+  n_time_masks: 2
