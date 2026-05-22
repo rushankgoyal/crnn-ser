@@ -217,7 +217,9 @@ def preprocess_dataset(
 
     def normalize_and_save(specs, labels, name):
         norm = [apply_normalizer(s, mean, std) for s in specs]
-        X = np.array(norm, dtype=object)
+        X = np.empty(len(norm), dtype=object)
+        for i, s in enumerate(norm):
+            X[i] = s
         np.savez(os.path.join(out_dir, f"{name}.npz"), X=X, y=labels)
         print(f"  Saved {name}.npz  ({len(labels)} clips)")
 
