@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.DS_Store
+data/raw/
+data/processed/
+runs/
+results/
+*.pt
+*.pth
+*.npz
+.ipynb_checkpoints/

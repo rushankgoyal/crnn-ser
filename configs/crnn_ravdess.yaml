@@ -1,0 +1,20 @@
+dataset: ravdess
+data_root: data/processed/ravdess
+num_classes: 4
+emotions: [happy, sad, angry, neutral]
+sample_rate: 16000
+n_mels: 128
+win_length_ms: 25
+hop_length_ms: 10
+model:
+  conv_channels: [1, 8, 16, 32, 64]
+  kernel_freq: 32
+  lstm_hidden: 128
+  lstm_layers: 1
+  dropout: 0.3
+train:
+  epochs: 50
+  lr: 0.001
+  weight_decay: 0.0001
+  val_fraction: 0.1
+  test_fraction: 0.1
