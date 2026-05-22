@@ -12,7 +12,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import yaml
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader
 from tqdm import tqdm
 
 from data.dataset import SERDataset
@@ -34,6 +34,7 @@ def build_model(cfg: dict) -> AnisotropicCRNN:
         lstm_hidden=m["lstm_hidden"],
         lstm_layers=m["lstm_layers"],
         dropout=m["dropout"],
+        norm=m.get("norm", "batch"),
     )
 
 
@@ -76,8 +77,11 @@ def train(cfg_path: str):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    train_set = SERDataset(os.path.join(data_root, "train.npz"))
-    val_set = SERDataset(os.path.join(data_root, "val.npz"))
+    # data_root may be a single path or a list of paths to combine across datasets
+    roots = [data_root] if isinstance(data_root, str) else list(data_root)
+    train_set = ConcatDataset([SERDataset(os.path.join(r, "train.npz")) for r in roots])
+    val_set = ConcatDataset([SERDataset(os.path.join(r, "val.npz")) for r in roots])
+    print(f"Train roots: {roots}  (train={len(train_set)}, val={len(val_set)})")
 
     # batch_size=1 — clips have variable T, no padding needed
     train_loader = DataLoader(train_set, batch_size=1, shuffle=True)
@@ -96,7 +100,7 @@ def train(cfg_path: str):
         optimizer, mode="max", factor=0.5, patience=5
     )
 
-    run_dir = os.path.join("runs", dataset_name)
+    run_dir = os.path.join("runs", cfg.get("run_name", dataset_name))
     os.makedirs(run_dir, exist_ok=True)
 
     best_uar = 0.0

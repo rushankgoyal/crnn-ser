@@ -220,6 +220,56 @@ def speaker_independent_split(
 
 
 # ---------------------------------------------------------------------------
+# Shared spec/save helpers
+# ---------------------------------------------------------------------------
+
+def _load_samples(dataset: str, source: str, raw_dir: str = None) -> list:
+    if source == "hf":
+        if dataset == "ravdess":
+            return _load_ravdess_hf()
+        if dataset == "esd":
+            return _load_esd_hf()
+        raise ValueError(f"Unknown dataset: {dataset}. Choose 'ravdess' or 'esd'.")
+    if not raw_dir:
+        raise ValueError("raw_dir is required when source='local'")
+    print(f"Scanning {dataset} files in {raw_dir} ...")
+    if dataset == "ravdess":
+        return _load_ravdess(raw_dir)
+    if dataset == "esd":
+        return _load_esd(raw_dir)
+    raise ValueError(f"Unknown dataset: {dataset}. Choose 'ravdess' or 'esd'.")
+
+
+def _compute_specs(split_samples, sr, n_mels, win_ms, hop_ms, trim_top_db):
+    specs, labels = [], []
+    for source_item, _, label_str in tqdm(split_samples):
+        if isinstance(source_item, np.ndarray):
+            audio = source_item
+        else:
+            audio = load_audio(source_item, sr=sr)
+        if trim_top_db is not None:
+            trimmed, _ = librosa.effects.trim(audio, top_db=trim_top_db)
+            if trimmed.size > 0:  # keep original if the whole clip is below threshold
+                audio = trimmed
+        spec = compute_log_mel(audio, sr=sr, n_mels=n_mels, win_ms=win_ms, hop_ms=hop_ms)
+        specs.append(spec)
+        labels.append(_LABEL_MAP[label_str])
+    return specs, np.array(labels, dtype=np.int64)
+
+
+def _save_specs(specs, labels, mean, std, out_dir, name):
+    norm = [apply_normalizer(s, mean, std) for s in specs]
+    # Clips share the freq dim (128) but vary in length, so build the object
+    # array element-by-element; np.array(..., dtype=object) tries to broadcast
+    # them into a ragged 2D array and fails.
+    X = np.empty(len(norm), dtype=object)
+    for i, s in enumerate(norm):
+        X[i] = s
+    np.savez(os.path.join(out_dir, f"{name}.npz"), X=X, y=labels)
+    print(f"  Saved {name}.npz  ({len(labels)} clips)")
+
+
+# ---------------------------------------------------------------------------
 # Full pipeline
 # ---------------------------------------------------------------------------
 
@@ -234,29 +284,13 @@ def preprocess_dataset(
     hop_ms: float = 10.0,
     val_fraction: float = 0.1,
     test_fraction: float = 0.1,
+    trim_top_db: float = None,
 ):
     os.makedirs(out_dir, exist_ok=True)
 
-    if source == "hf":
-        if dataset == "ravdess":
-            samples = _load_ravdess_hf()
-        elif dataset == "esd":
-            samples = _load_esd_hf()
-        else:
-            raise ValueError(f"Unknown dataset: {dataset}. Choose 'ravdess' or 'esd'.")
-    else:
-        if not raw_dir:
-            raise ValueError("--raw_dir is required when --source local")
-        print(f"Scanning {dataset} files in {raw_dir} ...")
-        if dataset == "ravdess":
-            samples = _load_ravdess(raw_dir)
-        elif dataset == "esd":
-            samples = _load_esd(raw_dir)
-        else:
-            raise ValueError(f"Unknown dataset: {dataset}. Choose 'ravdess' or 'esd'.")
-
+    samples = _load_samples(dataset, source, raw_dir)
     if not samples:
-        raise RuntimeError(f"No matching audio files found in {raw_dir}")
+        raise RuntimeError(f"No matching audio files found for {dataset}")
 
     print(f"Found {len(samples)} clips. Splitting by speaker ...")
     train_s, val_s, test_s = speaker_independent_split(
@@ -264,46 +298,82 @@ def preprocess_dataset(
     )
     print(f"  train={len(train_s)}  val={len(val_s)}  test={len(test_s)}")
 
-    def compute_specs(split_samples):
-        specs, labels = [], []
-        for source_item, _, label_str in tqdm(split_samples):
-            if isinstance(source_item, np.ndarray):
-                audio = source_item
-            else:
-                audio = load_audio(source_item, sr=sr)
-            spec = compute_log_mel(audio, sr=sr, n_mels=n_mels, win_ms=win_ms, hop_ms=hop_ms)
-            specs.append(spec)
-            labels.append(_LABEL_MAP[label_str])
-        return specs, np.array(labels, dtype=np.int64)
-
+    spec_args = (sr, n_mels, win_ms, hop_ms, trim_top_db)
     print("Computing train spectrograms ...")
-    train_specs, train_labels = compute_specs(train_s)
+    train_specs, train_labels = _compute_specs(train_s, *spec_args)
 
     print("Fitting per-bin normalizer on training set ...")
     mean, std = fit_normalizer(train_specs)
     np.save(os.path.join(out_dir, "normalizer_mean.npy"), mean)
     np.save(os.path.join(out_dir, "normalizer_std.npy"), std)
 
-    def normalize_and_save(specs, labels, name):
-        norm = [apply_normalizer(s, mean, std) for s in specs]
-        # Clips share the freq dim (128) but vary in length, so build the object
-        # array element-by-element; np.array(..., dtype=object) tries to broadcast
-        # them into a ragged 2D array and fails.
-        X = np.empty(len(norm), dtype=object)
-        for i, s in enumerate(norm):
-            X[i] = s
-        np.savez(os.path.join(out_dir, f"{name}.npz"), X=X, y=labels)
-        print(f"  Saved {name}.npz  ({len(labels)} clips)")
-
-    normalize_and_save(train_specs, train_labels, "train")
+    _save_specs(train_specs, train_labels, mean, std, out_dir, "train")
 
     print("Computing val spectrograms ...")
-    val_specs, val_labels = compute_specs(val_s)
-    normalize_and_save(val_specs, val_labels, "val")
+    val_specs, val_labels = _compute_specs(val_s, *spec_args)
+    _save_specs(val_specs, val_labels, mean, std, out_dir, "val")
 
     print("Computing test spectrograms ...")
-    test_specs, test_labels = compute_specs(test_s)
-    normalize_and_save(test_specs, test_labels, "test")
+    test_specs, test_labels = _compute_specs(test_s, *spec_args)
+    _save_specs(test_specs, test_labels, mean, std, out_dir, "test")
+
+    print(f"\nDone. Files written to {out_dir}/")
+
+
+def preprocess_combined(
+    out_dir: str,
+    datasets: list,
+    source: str = "hf",
+    raw_dirs: dict = None,
+    sr: int = 16000,
+    n_mels: int = 128,
+    win_ms: float = 25.0,
+    hop_ms: float = 10.0,
+    val_fraction: float = 0.1,
+    test_fraction: float = 0.1,
+    trim_top_db: float = None,
+):
+    """Combine multiple datasets into one jointly-normalized set.
+
+    Each dataset is split speaker-independently on its own (so every dataset is
+    represented in train/val/test), then the splits are concatenated and a SINGLE
+    per-bin normalizer is fit on the combined training spectrograms.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    raw_dirs = raw_dirs or {}
+
+    train_s, val_s, test_s = [], [], []
+    for ds in datasets:
+        samples = _load_samples(ds, source, raw_dirs.get(ds))
+        if not samples:
+            raise RuntimeError(f"No matching audio files found for {ds}")
+        tr, va, te = speaker_independent_split(
+            samples, val_fraction=val_fraction, test_fraction=test_fraction
+        )
+        print(f"  {ds}: train={len(tr)}  val={len(va)}  test={len(te)}")
+        train_s += tr
+        val_s += va
+        test_s += te
+    print(f"Combined: train={len(train_s)}  val={len(val_s)}  test={len(test_s)}")
+
+    spec_args = (sr, n_mels, win_ms, hop_ms, trim_top_db)
+    print("Computing train spectrograms ...")
+    train_specs, train_labels = _compute_specs(train_s, *spec_args)
+
+    print("Fitting JOINT per-bin normalizer on combined training set ...")
+    mean, std = fit_normalizer(train_specs)
+    np.save(os.path.join(out_dir, "normalizer_mean.npy"), mean)
+    np.save(os.path.join(out_dir, "normalizer_std.npy"), std)
+
+    _save_specs(train_specs, train_labels, mean, std, out_dir, "train")
+
+    print("Computing val spectrograms ...")
+    val_specs, val_labels = _compute_specs(val_s, *spec_args)
+    _save_specs(val_specs, val_labels, mean, std, out_dir, "val")
+
+    print("Computing test spectrograms ...")
+    test_specs, test_labels = _compute_specs(test_s, *spec_args)
+    _save_specs(test_specs, test_labels, mean, std, out_dir, "test")
 
     print(f"\nDone. Files written to {out_dir}/")
 
@@ -325,6 +395,8 @@ if __name__ == "__main__":
     parser.add_argument("--hop_ms", type=float, default=10.0)
     parser.add_argument("--val_fraction", type=float, default=0.1)
     parser.add_argument("--test_fraction", type=float, default=0.1)
+    parser.add_argument("--trim_top_db", type=float, default=None,
+                        help="If set, trim leading/trailing silence below this dB threshold (e.g. 30)")
     args = parser.parse_args()
 
     preprocess_dataset(
@@ -338,4 +410,5 @@ if __name__ == "__main__":
         hop_ms=args.hop_ms,
         val_fraction=args.val_fraction,
         test_fraction=args.test_fraction,
+        trim_top_db=args.trim_top_db,
     )

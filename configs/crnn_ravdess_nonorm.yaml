@@ -1,5 +1,5 @@
 dataset: ravdess
-run_name: ravdess_ln
+run_name: ravdess_nonorm
 data_root: data/processed/ravdess
 num_classes: 4
 emotions: [happy, sad, angry, neutral]
@@ -13,7 +13,7 @@ model:
   lstm_hidden: 128
   lstm_layers: 1
   dropout: 0.3
-  norm: layer
+  norm: none
 train:
   epochs: 50
   lr: 0.001

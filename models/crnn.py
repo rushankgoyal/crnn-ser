@@ -29,28 +29,35 @@ class AnisotropicCRNN(nn.Module):
         lstm_hidden: int = 128,
         lstm_layers: int = 1,
         dropout: float = 0.3,
+        norm: str = "batch",
     ):
         super().__init__()
         if conv_channels is None:
             conv_channels = [1, 8, 16, 32, 64]
 
         assert len(conv_channels) == 5, "conv_channels must have 5 entries (in + 4 out)"
+        if norm not in ("batch", "layer", "none"):
+            raise ValueError(f"Unknown norm: {norm}. Choose 'batch', 'layer', or 'none'.")
 
         conv_layers = []
         for i in range(4):
             in_ch = conv_channels[i]
             out_ch = conv_channels[i + 1]
-            conv_layers += [
-                nn.Conv2d(in_ch, out_ch, kernel_size=(kernel_freq, 1), padding=0),
-                nn.BatchNorm2d(out_ch),
-                nn.ReLU(inplace=True),
-            ]
+            conv_layers.append(nn.Conv2d(in_ch, out_ch, kernel_size=(kernel_freq, 1), padding=0))
+            if norm == "batch":
+                conv_layers.append(nn.BatchNorm2d(out_ch))
+            conv_layers.append(nn.ReLU(inplace=True))
         self.cnn = nn.Sequential(*conv_layers)
 
         # After 4 conv layers with kernel_freq=32 on 128 mel bins:
         # freq_out = 128 - 4*(kernel_freq-1) = 128 - 4*31 = 4
         freq_out = 128 - 4 * (kernel_freq - 1)
         lstm_input_size = freq_out * conv_channels[-1]
+
+        # LayerNorm on the flattened per-frame feature feeding the LSTM. Batch- and
+        # length-independent, and (unlike channel-wise norm in the conv stack) it
+        # preserves the inter-channel contrast the anisotropic kernels learn.
+        self.input_norm = nn.LayerNorm(lstm_input_size) if norm == "layer" else nn.Identity()
 
         self.lstm = nn.LSTM(
             input_size=lstm_input_size,
@@ -68,6 +75,7 @@ class AnisotropicCRNN(nn.Module):
         B, C, F, T = out.shape
         out = out.permute(0, 3, 1, 2)            # [1, T, 64, 4]
         out = out.reshape(B, T, C * F)           # [1, T, 256]
+        out = self.input_norm(out)               # LayerNorm over the 256-dim feature
         out, _ = self.lstm(out)                  # [1, T, lstm_hidden]
         out = self.dropout(out)
         logits = self.classifier(out)            # [1, T, num_classes]
