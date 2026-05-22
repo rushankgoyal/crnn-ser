@@ -1,9 +1,13 @@
 """
 Preprocess raw audio datasets into log-mel spectrogram .npz files.
 
-Usage:
+Local source (default):
     python data/preprocess.py --dataset ravdess --raw_dir /path/to/RAVDESS --out_dir data/processed/ravdess
     python data/preprocess.py --dataset esd     --raw_dir /path/to/ESD     --out_dir data/processed/esd
+
+HuggingFace source (no download required):
+    python data/preprocess.py --source hf --dataset ravdess --out_dir data/processed/ravdess
+    python data/preprocess.py --source hf --dataset esd     --out_dir data/processed/esd
 """
 
 import argparse
@@ -131,6 +135,57 @@ def _load_esd(raw_dir: str) -> list:
 
 
 # ---------------------------------------------------------------------------
+# HuggingFace loaders — return (audio_array_16k, speaker_id, label_str)
+# ---------------------------------------------------------------------------
+
+def _normalize_audio(arr: np.ndarray) -> np.ndarray:
+    arr = arr.astype(np.float32)
+    max_val = np.abs(arr).max()
+    if max_val > 0:
+        arr = arr / max_val
+    return arr
+
+
+def _load_ravdess_hf() -> list:
+    from datasets import load_dataset, Audio as HFAudio
+    print("Downloading AbstractTTS/RAVDESS from HuggingFace ...")
+    ds = load_dataset("AbstractTTS/RAVDESS", split="train")
+    ds = ds.cast_column("audio", HFAudio(sampling_rate=16000))
+
+    samples = []
+    for row in ds:
+        emotion = row["emotion"].lower()
+        if emotion not in _LABEL_MAP:
+            continue
+        # Speaker encoded as last two digits of filename: 03-01-01-01-01-01-01.wav
+        m = re.search(r"-(\d{2})\.wav$", row["file"])
+        speaker_id = f"Actor_{m.group(1)}" if m else row["file"]
+        samples.append((_normalize_audio(row["audio"]["array"]), speaker_id, emotion))
+    return samples
+
+
+def _load_esd_hf() -> list:
+    from datasets import load_dataset, Audio as HFAudio
+    print("Downloading AbstractTTS/ESD_english from HuggingFace ...")
+    # streaming avoids materializing the full dataset (10K–100K rows of audio)
+    ds = load_dataset("AbstractTTS/ESD_english", split="train", streaming=True)
+    ds = ds.cast_column("audio", HFAudio(sampling_rate=16000))
+
+    _ESD_LABEL_MAP = {"angry": "angry", "happy": "happy", "neutral": "neutral", "sad": "sad"}
+
+    samples = []
+    for row in tqdm(ds, desc="ESD_english"):
+        emotion = row.get("emotion", "").lower()
+        if emotion not in _ESD_LABEL_MAP:
+            continue
+        # ESD has no speaker column; the speaker is the filename prefix, e.g. "0011_000001.wav" -> "0011"
+        m = re.match(r"(\d+)_", os.path.basename(row.get("file", "")))
+        speaker_id = m.group(1) if m else "unknown"
+        samples.append((_normalize_audio(row["audio"]["array"]), speaker_id, emotion))
+    return samples
+
+
+# ---------------------------------------------------------------------------
 # Speaker-independent split
 # ---------------------------------------------------------------------------
 
@@ -169,9 +224,10 @@ def speaker_independent_split(
 # ---------------------------------------------------------------------------
 
 def preprocess_dataset(
-    raw_dir: str,
     out_dir: str,
     dataset: str,
+    source: str = "local",
+    raw_dir: str = None,
     sr: int = 16000,
     n_mels: int = 128,
     win_ms: float = 25.0,
@@ -181,13 +237,23 @@ def preprocess_dataset(
 ):
     os.makedirs(out_dir, exist_ok=True)
 
-    print(f"Scanning {dataset} files in {raw_dir} ...")
-    if dataset == "ravdess":
-        samples = _load_ravdess(raw_dir)
-    elif dataset == "esd":
-        samples = _load_esd(raw_dir)
+    if source == "hf":
+        if dataset == "ravdess":
+            samples = _load_ravdess_hf()
+        elif dataset == "esd":
+            samples = _load_esd_hf()
+        else:
+            raise ValueError(f"Unknown dataset: {dataset}. Choose 'ravdess' or 'esd'.")
     else:
-        raise ValueError(f"Unknown dataset: {dataset}. Choose 'ravdess' or 'esd'.")
+        if not raw_dir:
+            raise ValueError("--raw_dir is required when --source local")
+        print(f"Scanning {dataset} files in {raw_dir} ...")
+        if dataset == "ravdess":
+            samples = _load_ravdess(raw_dir)
+        elif dataset == "esd":
+            samples = _load_esd(raw_dir)
+        else:
+            raise ValueError(f"Unknown dataset: {dataset}. Choose 'ravdess' or 'esd'.")
 
     if not samples:
         raise RuntimeError(f"No matching audio files found in {raw_dir}")
@@ -200,8 +266,11 @@ def preprocess_dataset(
 
     def compute_specs(split_samples):
         specs, labels = [], []
-        for path, _, label_str in tqdm(split_samples):
-            audio = load_audio(path, sr=sr)
+        for source_item, _, label_str in tqdm(split_samples):
+            if isinstance(source_item, np.ndarray):
+                audio = source_item
+            else:
+                audio = load_audio(source_item, sr=sr)
             spec = compute_log_mel(audio, sr=sr, n_mels=n_mels, win_ms=win_ms, hop_ms=hop_ms)
             specs.append(spec)
             labels.append(_LABEL_MAP[label_str])
@@ -217,7 +286,12 @@ def preprocess_dataset(
 
     def normalize_and_save(specs, labels, name):
         norm = [apply_normalizer(s, mean, std) for s in specs]
-        X = np.array(norm, dtype=object)
+        # Clips share the freq dim (128) but vary in length, so build the object
+        # array element-by-element; np.array(..., dtype=object) tries to broadcast
+        # them into a ragged 2D array and fails.
+        X = np.empty(len(norm), dtype=object)
+        for i, s in enumerate(norm):
+            X[i] = s
         np.savez(os.path.join(out_dir, f"{name}.npz"), X=X, y=labels)
         print(f"  Saved {name}.npz  ({len(labels)} clips)")
 
@@ -241,7 +315,9 @@ def preprocess_dataset(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Preprocess audio dataset to log-mel .npz files")
     parser.add_argument("--dataset", required=True, choices=["ravdess", "esd"])
-    parser.add_argument("--raw_dir", required=True, help="Root directory of raw audio files")
+    parser.add_argument("--source", default="local", choices=["local", "hf"],
+                        help="'local' reads from --raw_dir; 'hf' downloads from HuggingFace")
+    parser.add_argument("--raw_dir", default=None, help="Root directory of raw audio files (local source only)")
     parser.add_argument("--out_dir", required=True, help="Output directory for .npz files")
     parser.add_argument("--sr", type=int, default=16000)
     parser.add_argument("--n_mels", type=int, default=128)
@@ -252,9 +328,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     preprocess_dataset(
-        raw_dir=args.raw_dir,
         out_dir=args.out_dir,
         dataset=args.dataset,
+        source=args.source,
+        raw_dir=args.raw_dir,
         sr=args.sr,
         n_mels=args.n_mels,
         win_ms=args.win_ms,
