@@ -1,0 +1,38 @@
+dataset: msp_improv
+run_name: msp_harmonic_freqpos
+data_root: data/processed/msp_improv
+num_classes: 4
+emotions: [happy, sad, angry, neutral]
+sample_rate: 16000
+n_mels: 128
+win_length_ms: 25
+hop_length_ms: 10
+model:
+  conv_channels: [1, 8, 16, 32, 64]
+  kernel_freq: 32
+  lstm_hidden: 128
+  lstm_layers: 1
+  dropout: 0.5
+  # Component A — HarmonicDilatedBlock
+  use_harmonic_block: true
+  harmonic_out_ch: 8
+  dilation_mode: octave
+  dilations: [1, 2, 4, 8]
+  kernel_h: 3
+  # Component B — FrequencyPositionalConditioning
+  use_freq_pos: true
+  freq_pos_mode: concat
+  pos_dim: 1
+  pos_init: learned
+  verbose: false
+train:
+  epochs: 50
+  lr: 0.001
+  weight_decay: 0.001
+  val_fraction: 0.1
+  test_fraction: 0.1
+augment:
+  freq_mask_max: 20
+  time_mask_max: 50
+  n_freq_masks: 2
+  n_time_masks: 2

@@ -102,6 +102,59 @@ def _load_ravdess(raw_dir: str) -> list:
     return samples
 
 
+# MSP-IMPROV
+# Label file: Evalution.txt (sic), one line per utterance:
+#   MSP-IMPROV-S01A-F01-S-A01.wav ; H ; H,N,H ; ...
+# Majority-vote emotion is the 2nd semicolon-delimited field.
+# Speakers encoded in filename: S{session}{gender}, e.g. S01A, S01B (12 total).
+_MSP_EMOTION_MAP = {
+    "A": "angry",
+    "H": "happy",
+    "N": "neutral",
+    "S": "sad",
+}
+
+
+def _load_msp_improv(raw_dir: str) -> list:
+    """Returns list of (audio_path, speaker_id, label_str)."""
+    root = Path(raw_dir)
+
+    label_file = root / "Evalution.txt"
+    if not label_file.exists():
+        found = list(root.rglob("Evalution.txt"))
+        if not found:
+            raise FileNotFoundError(
+                f"Evalution.txt not found under {raw_dir}. "
+                "Make sure you placed the MSP-IMPROV root directory correctly."
+            )
+        label_file = found[0]
+
+    # Build filename → absolute path index once
+    audio_index = {p.name: str(p) for p in root.rglob("*.wav")}
+
+    samples = []
+    with open(label_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith(";"):
+                continue
+            parts = [p.strip() for p in line.split(";")]
+            if len(parts) < 2:
+                continue
+            fname = parts[0]
+            emotion_code = parts[1]
+            if emotion_code not in _MSP_EMOTION_MAP:
+                continue
+            if fname not in audio_index:
+                continue
+            # Speaker ID from filename: MSP-IMPROV-S01A-... → "S01A"
+            tokens = fname.replace(".wav", "").split("-")
+            speaker_id = tokens[2] if len(tokens) > 2 else "unknown"
+            samples.append((audio_index[fname], speaker_id, _MSP_EMOTION_MAP[emotion_code]))
+
+    return samples
+
+
 # ESD-English folder structure: ESD/{speaker}/{emotion}/{split}/{file}.wav
 # Emotions: Angry, Happy, Neutral, Sad, Surprise
 _ESD_EMOTION_MAP = {
@@ -184,10 +237,12 @@ def preprocess_dataset(
     print(f"Scanning {dataset} files in {raw_dir} ...")
     if dataset == "ravdess":
         samples = _load_ravdess(raw_dir)
+    elif dataset == "msp_improv":
+        samples = _load_msp_improv(raw_dir)
     elif dataset == "esd":
         samples = _load_esd(raw_dir)
     else:
-        raise ValueError(f"Unknown dataset: {dataset}. Choose 'ravdess' or 'esd'.")
+        raise ValueError(f"Unknown dataset: {dataset}. Choose 'ravdess', 'msp_improv', or 'esd'.")
 
     if not samples:
         raise RuntimeError(f"No matching audio files found in {raw_dir}")
@@ -242,7 +297,7 @@ def preprocess_dataset(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Preprocess audio dataset to log-mel .npz files")
-    parser.add_argument("--dataset", required=True, choices=["ravdess", "esd"])
+    parser.add_argument("--dataset", required=True, choices=["ravdess", "msp_improv", "esd"])
     parser.add_argument("--raw_dir", required=True, help="Root directory of raw audio files")
     parser.add_argument("--out_dir", required=True, help="Output directory for .npz files")
     parser.add_argument("--sr", type=int, default=16000)
