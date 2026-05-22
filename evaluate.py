@@ -89,7 +89,8 @@ def evaluate(cfg_path: str, checkpoint_path: str):
         print(f"\n  {e}: median first-correct frame = {fc_stats[e]['median_frame']}")
 
     # Save results
-    results_dir = os.path.join("results", dataset_name)
+    run_name = cfg.get("run_name", dataset_name)
+    results_dir = os.path.join("results", run_name)
     os.makedirs(results_dir, exist_ok=True)
 
     metrics = {
@@ -97,16 +98,17 @@ def evaluate(cfg_path: str, checkpoint_path: str):
         "weighted_accuracy": wacc,
         "confusion_matrix": cm.tolist(),
         "first_correct_frame_stats": fc_stats,
+        "latency_curve": curve.tolist(),   # saved for cross-variant comparison plots
     }
     with open(os.path.join(results_dir, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
-    print(f"\nSaved metrics → results/{dataset_name}/metrics.json")
+    print(f"\nSaved metrics → results/{run_name}/metrics.json")
 
     # Plot latency-accuracy curve
-    _plot_latency_curve(curve, all_logits, all_labels, emotions, results_dir, cfg)
+    _plot_latency_curve(curve, all_logits, all_labels, emotions, results_dir, cfg, run_name)
 
 
-def _plot_latency_curve(curve, all_logits, all_labels, emotions, results_dir, cfg):
+def _plot_latency_curve(curve, all_logits, all_labels, emotions, results_dir, cfg, run_name=""):
     hop_ms = cfg.get("hop_length_ms", 10.0)
     frames = np.arange(len(curve))
     time_ms = frames * hop_ms

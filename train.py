@@ -26,14 +26,35 @@ def load_config(path: str) -> dict:
 
 
 def build_model(cfg: dict) -> AnisotropicCRNN:
-    m = cfg["model"]
+    m = cfg.get("model", {})
+    sr = cfg.get("sample_rate", 16000)
+    win_ms = cfg.get("win_length_ms", 25.0)
     return AnisotropicCRNN(
         num_classes=cfg["num_classes"],
-        conv_channels=m["conv_channels"],
-        kernel_freq=m["kernel_freq"],
-        lstm_hidden=m["lstm_hidden"],
-        lstm_layers=m["lstm_layers"],
-        dropout=m["dropout"],
+        conv_channels=m.get("conv_channels", [1, 8, 16, 32, 64]),
+        kernel_freq=m.get("kernel_freq", 32),
+        lstm_hidden=m.get("lstm_hidden", 128),
+        lstm_layers=m.get("lstm_layers", 1),
+        dropout=m.get("dropout", 0.3),
+        n_mels=cfg.get("n_mels", 128),
+        # Component B
+        use_freq_pos=m.get("use_freq_pos", False),
+        freq_pos_mode=m.get("freq_pos_mode", "concat"),
+        pos_dim=m.get("pos_dim", 1),
+        pos_init=m.get("pos_init", "learned"),
+        # Component A
+        use_harmonic_block=m.get("use_harmonic_block", False),
+        harmonic_out_ch=m.get("harmonic_out_ch", 8),
+        dilation_mode=m.get("dilation_mode", "octave"),
+        dilations=m.get("dilations", [1, 2, 4, 8]),
+        kernel_h=m.get("kernel_h", 3),
+        # mel params for empirical dilations
+        sample_rate=sr,
+        n_fft=int(sr * win_ms / 1000),
+        fmin=cfg.get("fmin", 0.0),
+        fmax=cfg.get("fmax", None),
+        f0_range=tuple(m.get("f0_range", [80, 300])),
+        verbose=m.get("verbose", False),
     )
 
 
@@ -96,7 +117,7 @@ def train(cfg_path: str):
         optimizer, mode="max", factor=0.5, patience=5
     )
 
-    run_dir = os.path.join("runs", dataset_name)
+    run_dir = os.path.join("runs", cfg.get("run_name", dataset_name))
     os.makedirs(run_dir, exist_ok=True)
 
     best_uar = 0.0

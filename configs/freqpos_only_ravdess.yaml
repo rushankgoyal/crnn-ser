@@ -1,5 +1,5 @@
 dataset: ravdess
-run_name: ravdess_baseline
+run_name: ravdess_freqpos
 data_root: data/processed/ravdess
 num_classes: 4
 emotions: [happy, sad, angry, neutral]
@@ -13,6 +13,11 @@ model:
   lstm_hidden: 128
   lstm_layers: 1
   dropout: 0.3
+  use_harmonic_block: false
+  use_freq_pos: true
+  freq_pos_mode: concat   # or film
+  pos_dim: 1
+  pos_init: learned       # or sinusoidal, linear_ramp
 train:
   epochs: 50
   lr: 0.001

@@ -1,4 +1,6 @@
-torch>=2.0.0
+# Core — do NOT pin torch/torchaudio: Colab provides them pre-installed with CUDA.
+# On Colab: pip install -r requirements.txt  (torch/torchaudio already present)
+# Locally:  pip install torch torchaudio && pip install -r requirements.txt
 torchaudio>=2.0.0
 librosa>=0.10.0
 numpy>=1.24.0
