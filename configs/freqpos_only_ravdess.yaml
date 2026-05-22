@@ -10,7 +10,7 @@ hop_length_ms: 10
 model:
   conv_channels: [1, 8, 16, 32, 64]
   kernel_freq: 32
-  lstm_hidden: 128
+  lstm_hidden: 64
   lstm_layers: 1
   dropout: 0.5
   use_harmonic_block: false
@@ -25,7 +25,7 @@ train:
   val_fraction: 0.1
   test_fraction: 0.1
 augment:
-  freq_mask_max: 20
-  time_mask_max: 50
+  freq_mask_max: 27
+  time_mask_max: 80
   n_freq_masks: 2
   n_time_masks: 2

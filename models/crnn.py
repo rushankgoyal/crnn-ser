@@ -110,6 +110,7 @@ class AnisotropicCRNN(nn.Module):
                 nn.Conv2d(in_ch, out_ch, kernel_size=(kernel_freq, 1), padding=0),
                 nn.BatchNorm2d(out_ch),
                 nn.ReLU(inplace=True),
+                nn.Dropout2d(p=0.1),
             ]
         self.cnn = nn.Sequential(*conv_layers)
 
