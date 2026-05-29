@@ -17,6 +17,7 @@ from tqdm import tqdm
 
 from data.dataset import SERDataset
 from models.crnn import AnisotropicCRNN
+from models.sharan import SharanCRNN
 from utils.metrics import unweighted_avg_recall
 
 
@@ -25,16 +26,38 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def build_model(cfg: dict) -> AnisotropicCRNN:
+def build_model(cfg: dict):
+    """Build the model. cfg['model']['arch'] selects:
+       'anisotropic' (default, our proposed CRNN + ablation knobs)
+       'sharan'      (published CNN-BiLSTM baseline, see models/sharan.py)
+    """
     m = cfg.get("model", {})
     sr = cfg.get("sample_rate", 16000)
     win_ms = cfg.get("win_length_ms", 25.0)
+    arch = m.get("arch", "anisotropic")
+
+    if arch == "sharan":
+        return SharanCRNN(
+            num_classes=cfg["num_classes"],
+            n_mels=cfg.get("n_mels", 128),
+            conv_channels=m.get("conv_channels", [1, 32, 64, 128, 128]),
+            lstm_hidden=m.get("lstm_hidden", 128),
+            lstm_layers=m.get("lstm_layers", 1),
+            bidirectional=m.get("bidirectional", True),
+            dropout=m.get("dropout", 0.3),
+            n_time_pools=m.get("n_time_pools", 3),
+            verbose=m.get("verbose", False),
+        )
+
     return AnisotropicCRNN(
         num_classes=cfg["num_classes"],
         conv_channels=m.get("conv_channels", [1, 8, 16, 32, 64]),
         kernel_freq=m.get("kernel_freq", 32),
+        kernel_time=m.get("kernel_time", 1),
+        freq_stride=m.get("freq_stride", 1),
         lstm_hidden=m.get("lstm_hidden", 128),
         lstm_layers=m.get("lstm_layers", 1),
+        bidirectional=m.get("bidirectional", False),
         dropout=m.get("dropout", 0.3),
         n_mels=cfg.get("n_mels", 128),
         # Component B
@@ -79,7 +102,11 @@ def spec_augment(spec: torch.Tensor, cfg: dict) -> torch.Tensor:
     return out
 
 
-def run_epoch(model, loader, optimizer, device, train: bool, augment_cfg: dict = None):
+def run_epoch(model, loader, optimizer, device, train: bool, augment_cfg: dict = None,
+              loss_mode: str = "per_frame", label_smoothing: float = 0.1):
+    """loss_mode='per_frame' applies CE at every frame (our proposed setup).
+       loss_mode='last_frame' applies CE only at the final frame (baseline)."""
+    assert loss_mode in ("per_frame", "last_frame"), f"bad loss_mode {loss_mode!r}"
     model.train(train)
     total_loss = 0.0
     all_preds, all_labels = [], []
@@ -93,9 +120,12 @@ def run_epoch(model, loader, optimizer, device, train: bool, augment_cfg: dict =
 
         logits = model(spec).squeeze(0)   # [T, C]
         T = logits.shape[0]
-        targets = label.expand(T)         # [T]
 
-        loss = F.cross_entropy(logits, targets, label_smoothing=0.1)
+        if loss_mode == "per_frame":
+            targets = label.expand(T)
+            loss = F.cross_entropy(logits, targets, label_smoothing=label_smoothing)
+        else:  # last_frame
+            loss = F.cross_entropy(logits[-1:].view(1, -1), label, label_smoothing=label_smoothing)
 
         if train:
             optimizer.zero_grad()
@@ -120,8 +150,10 @@ def train(cfg_path: str):
     t_cfg = cfg["train"]
 
     augment_cfg = cfg.get("augment", None)
+    loss_mode = t_cfg.get("loss_mode", "per_frame")
+    label_smoothing = t_cfg.get("label_smoothing", 0.1)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    print(f"Device: {device}  loss_mode: {loss_mode}")
 
     train_set = SERDataset(os.path.join(data_root, "train.npz"))
     val_set = SERDataset(os.path.join(data_root, "val.npz"))
@@ -148,8 +180,11 @@ def train(cfg_path: str):
 
     best_uar = 0.0
     for epoch in range(1, t_cfg["epochs"] + 1):
-        train_loss, train_uar = run_epoch(model, train_loader, optimizer, device, train=True, augment_cfg=augment_cfg)
-        val_loss, val_uar = run_epoch(model, val_loader, optimizer, device, train=False)
+        train_loss, train_uar = run_epoch(model, train_loader, optimizer, device, train=True,
+                                          augment_cfg=augment_cfg, loss_mode=loss_mode,
+                                          label_smoothing=label_smoothing)
+        val_loss, val_uar = run_epoch(model, val_loader, optimizer, device, train=False,
+                                      loss_mode=loss_mode, label_smoothing=label_smoothing)
         scheduler.step(val_uar)
 
         print(

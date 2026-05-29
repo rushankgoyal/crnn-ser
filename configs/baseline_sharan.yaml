@@ -1,0 +1,34 @@
+# Baseline B4: Sharan-style CNN-BiLSTM (published-pattern overall comparison)
+# 3x3 conv stack + 2x2 maxpool + BiLSTM + last-frame loss. Differs from the
+# proposed model on MULTIPLE axes at once (kernel shape, downsampling, RNN
+# direction, loss); use it as the headline "vs published SOTA pattern" number,
+# and the single-knob baselines above for causal attribution of each effect.
+dataset: ravdess
+run_name: baseline_sharan
+data_root: data/processed/ravdess
+num_classes: 4
+emotions: [happy, sad, angry, neutral]
+sample_rate: 16000
+n_mels: 128
+win_length_ms: 25
+hop_length_ms: 10
+model:
+  arch: sharan
+  conv_channels: [1, 32, 64, 128, 128]
+  lstm_hidden: 128
+  lstm_layers: 1
+  bidirectional: true
+  dropout: 0.3
+  n_time_pools: 3   # pool time 2x for first 3 conv blocks → T // 8 frames
+train:
+  epochs: 50
+  lr: 0.0005
+  weight_decay: 0.0001
+  val_fraction: 0.1
+  test_fraction: 0.1
+  loss_mode: last_frame
+augment:
+  freq_mask_max: 27
+  time_mask_max: 80
+  n_freq_masks: 2
+  n_time_masks: 2

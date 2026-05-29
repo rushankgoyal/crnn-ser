@@ -21,6 +21,7 @@ except ImportError:
 from models.harmonic_block import HarmonicDilatedBlock, compute_harmonic_dilations
 from models.freq_pos import FrequencyPositionalConditioning
 from models.crnn import AnisotropicCRNN
+from models.sharan import SharanCRNN
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +239,62 @@ def test_crnn_all_off_equals_baseline():
     )
 
 
+# ---------------------------------------------------------------------------
+# Baseline variants — 3×3 square kernel, BiLSTM, Sharan
+# ---------------------------------------------------------------------------
+
+def test_crnn_square_kernel_3x3_shape():
+    """3×3 kernel with freq_stride=2 should halve freq per layer (128→64→32→16→8)
+       and preserve T thanks to same-padding on time."""
+    model = AnisotropicCRNN(kernel_freq=3, kernel_time=3, freq_stride=2)
+    out = model(_make_input(T=50))
+    assert out.shape == (1, 50, 4), f"got {out.shape}"
+
+
+def test_crnn_square_kernel_backward():
+    model = AnisotropicCRNN(kernel_freq=3, kernel_time=3, freq_stride=2)
+    x = torch.randn(1, 1, 128, 40)
+    out = model(x)
+    out.sum().backward()
+    for name, p in model.named_parameters():
+        assert p.grad is not None, f"No grad for {name}"
+
+
+def test_crnn_bidirectional_shape():
+    """BiLSTM variant must still produce (B, T, C) and have a 2H -> C head."""
+    model = AnisotropicCRNN(bidirectional=True, lstm_hidden=64)
+    out = model(_make_input(T=50))
+    assert out.shape == (1, 50, 4)
+    # classifier in_features should be 2 * lstm_hidden
+    assert model.classifier.in_features == 128, model.classifier.in_features
+
+
+def test_crnn_bidirectional_param_count_grows():
+    uni = AnisotropicCRNN(bidirectional=False, lstm_hidden=64)
+    bi  = AnisotropicCRNN(bidirectional=True,  lstm_hidden=64)
+    n_uni = sum(p.numel() for p in uni.parameters())
+    n_bi  = sum(p.numel() for p in bi.parameters())
+    assert n_bi > n_uni, f"BiLSTM should have more params: {n_uni} vs {n_bi}"
+
+
+def test_sharan_shape():
+    """Sharan baseline returns per-frame logits at a pooled time resolution."""
+    model = SharanCRNN(num_classes=4, n_time_pools=3)
+    x = torch.randn(1, 1, 128, 80)  # T=80 → after 3 time-pools → T'=10
+    out = model(x)
+    assert out.shape[0] == 1 and out.shape[2] == 4
+    assert out.shape[1] == 80 // 8, f"expected T'=10, got {out.shape[1]}"
+
+
+def test_sharan_backward():
+    model = SharanCRNN()
+    x = torch.randn(1, 1, 128, 80)
+    out = model(x)
+    out.sum().backward()
+    for name, p in model.named_parameters():
+        assert p.grad is not None, f"No grad for {name}"
+
+
 def test_crnn_backward_both():
     model = AnisotropicCRNN(
         use_harmonic_block=True, harmonic_out_ch=8,
@@ -276,6 +333,12 @@ if __name__ == "__main__":
         test_crnn_empirical_dilation_mode,
         test_crnn_first_conv_in_ch_bumped,
         test_crnn_all_off_equals_baseline,
+        test_crnn_square_kernel_3x3_shape,
+        test_crnn_square_kernel_backward,
+        test_crnn_bidirectional_shape,
+        test_crnn_bidirectional_param_count_grows,
+        test_sharan_shape,
+        test_sharan_backward,
         test_crnn_backward_both,
     ]
 

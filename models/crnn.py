@@ -32,8 +32,11 @@ class AnisotropicCRNN(nn.Module):
         num_classes: int = 4,
         conv_channels: list = None,
         kernel_freq: int = 32,
+        kernel_time: int = 1,            # 1 = freq-only (proposed). 3 = square 3×3 baseline.
+        freq_stride: int = 1,            # >1 halves/quarters freq per layer (used for 3×3 baseline)
         lstm_hidden: int = 128,
         lstm_layers: int = 1,
+        bidirectional: bool = False,     # True = BiLSTM baseline (isolates causality)
         dropout: float = 0.3,
         n_mels: int = 128,
         # Component B — FrequencyPositionalConditioning
@@ -102,30 +105,53 @@ class AnisotropicCRNN(nn.Module):
             first_in_ch = harmonic_out_ch
 
         # --- build main CNN (only first conv's in_ch may differ from baseline) ---
+        # Two regimes:
+        #   kernel_time == 1 (default, proposed):
+        #       freq-axis valid conv, no time padding, no freq stride.
+        #       freq dim shrinks deterministically; T is preserved bit-for-bit.
+        #   kernel_time > 1 (e.g. square 3×3 baseline):
+        #       same-padding on time so T is preserved (per-frame loss still works),
+        #       optional freq_stride>1 to reduce freq dim across 4 layers.
+        time_pad = (kernel_time - 1) // 2
+        freq_pad = 0 if kernel_time == 1 else (1 if kernel_freq == 3 else 0)
+
         conv_layers = []
+        cur_freq = n_mels
         for i in range(4):
             in_ch = first_in_ch if i == 0 else conv_channels[i]
             out_ch = conv_channels[i + 1]
             conv_layers += [
-                nn.Conv2d(in_ch, out_ch, kernel_size=(kernel_freq, 1), padding=0),
+                nn.Conv2d(
+                    in_ch, out_ch,
+                    kernel_size=(kernel_freq, kernel_time),
+                    stride=(freq_stride, 1),
+                    padding=(freq_pad, time_pad),
+                ),
                 nn.BatchNorm2d(out_ch),
                 nn.ReLU(inplace=True),
                 nn.Dropout2d(p=0.1),
             ]
+            # track effective output freq dim after each layer
+            cur_freq = (cur_freq + 2 * freq_pad - (kernel_freq - 1) - 1) // freq_stride + 1
         self.cnn = nn.Sequential(*conv_layers)
 
-        freq_out = n_mels - 4 * (kernel_freq - 1)
+        freq_out = cur_freq
+        assert freq_out >= 1, (
+            f"CNN collapsed freq dim to {freq_out}; check kernel_freq/freq_stride/freq_pad."
+        )
         lstm_input_size = freq_out * conv_channels[-1]
 
+        self.bidirectional = bidirectional
         self.lstm = nn.LSTM(
             input_size=lstm_input_size,
             hidden_size=lstm_hidden,
             num_layers=lstm_layers,
             batch_first=True,
-            bidirectional=False,
+            bidirectional=bidirectional,
         )
         self.dropout = nn.Dropout(dropout)
-        self.classifier = nn.Linear(lstm_hidden, num_classes)
+        head_in = lstm_hidden * (2 if bidirectional else 1)
+        self.classifier = nn.Linear(head_in, num_classes)
 
         if verbose:
             total = sum(p.numel() for p in self.parameters())

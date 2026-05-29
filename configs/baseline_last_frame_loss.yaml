@@ -1,0 +1,36 @@
+# Baseline B3: last-frame loss (isolates "per-frame supervision")
+# Architecture is identical to the proposed baseline; only the training loss
+# differs. If the early-commitment hypothesis is right, this baseline should
+# show a worse latency-accuracy curve (slower rise to peak accuracy) while
+# its final-frame UAR may be similar.
+dataset: ravdess
+run_name: baseline_last_frame_loss
+data_root: data/processed/ravdess
+num_classes: 4
+emotions: [happy, sad, angry, neutral]
+sample_rate: 16000
+n_mels: 128
+win_length_ms: 25
+hop_length_ms: 10
+model:
+  arch: anisotropic
+  conv_channels: [1, 8, 16, 32, 64]
+  kernel_freq: 32
+  kernel_time: 1
+  freq_stride: 1
+  lstm_hidden: 64
+  lstm_layers: 1
+  bidirectional: false
+  dropout: 0.5
+train:
+  epochs: 50
+  lr: 0.001
+  weight_decay: 0.0001
+  val_fraction: 0.1
+  test_fraction: 0.1
+  loss_mode: last_frame
+augment:
+  freq_mask_max: 27
+  time_mask_max: 80
+  n_freq_masks: 2
+  n_time_masks: 2
