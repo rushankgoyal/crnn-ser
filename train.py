@@ -125,13 +125,19 @@ def spec_augment(spec: torch.Tensor, cfg: dict) -> torch.Tensor:
 
 
 def run_epoch(model, loader, optimizer, device, train: bool, augment_cfg: dict = None,
-              loss_mode: str = "per_frame", label_smoothing: float = 0.1):
+              loss_mode: str = "per_frame", label_smoothing: float = 0.1,
+              frame_weight_alpha: float = 0.0):
     """Batched epoch with padding-aware loss/metrics.
 
     loss_mode='per_frame' applies CE at every *valid* frame (our proposed setup);
-    loss_mode='last_frame' applies CE only at each clip's last valid frame.
+    loss_mode='last_frame' applies CE only at each clip's last valid frame;
+    loss_mode='weighted'   applies CE at every valid frame with a position weight
+        w_t ∝ exp(alpha * (0.5 - t/(L-1))), normalized per clip. alpha>0 emphasizes
+        EARLY frames (pushes faster commitment), alpha=0 is uniform (== per_frame),
+        alpha<0 emphasizes LATE frames (toward last_frame). This is the knob swept
+        in the early-commitment experiment.
     Padded frames never contribute to the loss, the UAR, or the LSTM (packed)."""
-    assert loss_mode in ("per_frame", "last_frame"), f"bad loss_mode {loss_mode!r}"
+    assert loss_mode in ("per_frame", "last_frame", "weighted"), f"bad loss_mode {loss_mode!r}"
     model.train(train)
     total_loss = 0.0
     all_preds, all_labels = [], []
@@ -149,17 +155,25 @@ def run_epoch(model, loader, optimizer, device, train: bool, augment_cfg: dict =
         last_idx = out_lens - 1                                       # [B]
         last_logits = logits[torch.arange(B, device=device), last_idx]  # [B, C] (last valid frame)
 
-        if loss_mode == "per_frame":
+        if loss_mode == "last_frame":
+            loss = F.cross_entropy(last_logits, label, label_smoothing=label_smoothing)
+        else:  # per_frame (uniform) or weighted (position-weighted)
             frame_idx = torch.arange(T_out, device=device).unsqueeze(0)   # [1, T_out]
-            mask = frame_idx < out_lens.unsqueeze(1)                      # [B, T_out]
+            mask = (frame_idx < out_lens.unsqueeze(1)).float()            # [B, T_out]
             ce = F.cross_entropy(
                 logits.reshape(B * T_out, C),
                 label.unsqueeze(1).expand(B, T_out).reshape(B * T_out),
                 label_smoothing=label_smoothing, reduction="none",
             ).reshape(B, T_out)
-            loss = (ce * mask).sum() / mask.sum().clamp(min=1)
-        else:  # last_frame
-            loss = F.cross_entropy(last_logits, label, label_smoothing=label_smoothing)
+            if loss_mode == "weighted" and frame_weight_alpha != 0.0:
+                # position in [0,1] over each clip's valid frames; weight emphasizes
+                # early (alpha>0) or late (alpha<0) frames, normalized per clip.
+                pos = frame_idx.float() / (out_lens.clamp(min=2) - 1).float().unsqueeze(1)
+                w = torch.exp(frame_weight_alpha * (0.5 - pos)) * mask
+                w = w / w.sum(dim=1, keepdim=True).clamp(min=1e-8)
+                loss = (ce * w).sum() / B
+            else:
+                loss = (ce * mask).sum() / mask.sum().clamp(min=1)
 
         if train:
             optimizer.zero_grad()
@@ -185,6 +199,7 @@ def train(cfg_path: str):
     augment_cfg = cfg.get("augment", None)
     loss_mode = t_cfg.get("loss_mode", "per_frame")
     label_smoothing = t_cfg.get("label_smoothing", 0.1)
+    frame_weight_alpha = t_cfg.get("frame_weight_alpha", 0.0)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}  loss_mode: {loss_mode}")
 
@@ -220,9 +235,11 @@ def train(cfg_path: str):
     for epoch in range(1, t_cfg["epochs"] + 1):
         train_loss, train_uar = run_epoch(model, train_loader, optimizer, device, train=True,
                                           augment_cfg=augment_cfg, loss_mode=loss_mode,
-                                          label_smoothing=label_smoothing)
+                                          label_smoothing=label_smoothing,
+                                          frame_weight_alpha=frame_weight_alpha)
         val_loss, val_uar = run_epoch(model, val_loader, optimizer, device, train=False,
-                                      loss_mode=loss_mode, label_smoothing=label_smoothing)
+                                      loss_mode=loss_mode, label_smoothing=label_smoothing,
+                                      frame_weight_alpha=frame_weight_alpha)
         scheduler.step(val_uar)
 
         print(
