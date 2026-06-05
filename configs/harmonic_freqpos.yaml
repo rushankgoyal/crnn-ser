@@ -10,9 +10,10 @@ hop_length_ms: 10
 model:
   conv_channels: [1, 8, 16, 32, 64]
   kernel_freq: 32
-  lstm_hidden: 64
+  lstm_hidden: 128
   lstm_layers: 1
-  dropout: 0.5
+  dropout: 0.3
+  norm: layernorm
   # Component A — HarmonicDilatedBlock
   use_harmonic_block: true
   harmonic_out_ch: 8
@@ -26,6 +27,7 @@ model:
   pos_init: learned       # or sinusoidal, linear_ramp
   verbose: false
 train:
+  batch_size: 32
   epochs: 50
   lr: 0.001
   weight_decay: 0.0001

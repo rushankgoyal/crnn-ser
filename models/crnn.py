@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
+from models import make_norm
 from models.harmonic_block import HarmonicDilatedBlock, compute_harmonic_dilations
 from models.freq_pos import FrequencyPositionalConditioning
 
@@ -38,6 +40,7 @@ class AnisotropicCRNN(nn.Module):
         lstm_layers: int = 1,
         bidirectional: bool = False,     # True = BiLSTM baseline (isolates causality)
         dropout: float = 0.3,
+        norm: str = "layernorm",         # 'layernorm' (paper, batch-independent) | 'batchnorm'
         n_mels: int = 128,
         # Component B — FrequencyPositionalConditioning
         use_freq_pos: bool = False,
@@ -100,6 +103,7 @@ class AnisotropicCRNN(nn.Module):
                 out_ch=harmonic_out_ch,
                 dilations=dilations,
                 kernel_h=kernel_h,
+                norm=norm,
                 verbose=verbose,
             )
             first_in_ch = harmonic_out_ch
@@ -127,7 +131,7 @@ class AnisotropicCRNN(nn.Module):
                     stride=(freq_stride, 1),
                     padding=(freq_pad, time_pad),
                 ),
-                nn.BatchNorm2d(out_ch),
+                make_norm(norm, out_ch),
                 nn.ReLU(inplace=True),
                 nn.Dropout2d(p=0.1),
             ]
@@ -157,8 +161,14 @@ class AnisotropicCRNN(nn.Module):
             total = sum(p.numel() for p in self.parameters())
             print(f"[AnisotropicCRNN] total params={total:,}")
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B, 1, n_mels, T]
+    def output_lengths(self, lengths: torch.Tensor) -> torch.Tensor:
+        """Map input-frame lengths to output (LSTM-time) lengths. The frequency-only
+        conv front end preserves the time axis exactly, so this is the identity."""
+        return lengths.clone()
+
+    def forward(self, x: torch.Tensor, lengths: torch.Tensor = None) -> torch.Tensor:
+        # x: [B, 1, n_mels, T].  lengths: optional [B] valid time-frame counts for
+        # batched/padded input — used to pack the LSTM so padding is ignored.
 
         # concat-mode pos embedding prepended before harmonic block
         if self.freq_pos is not None and self.freq_pos.mode == "concat":
@@ -176,7 +186,14 @@ class AnisotropicCRNN(nn.Module):
         B, C, F, T = out.shape
         out = out.permute(0, 3, 1, 2)            # [B, T, 64, freq_out]
         out = out.reshape(B, T, C * F)           # [B, T, lstm_input_size]
-        out, _ = self.lstm(out)                  # [B, T, lstm_hidden]
+
+        if lengths is not None:
+            lens = lengths.detach().to("cpu", torch.int64).clamp(min=1, max=T)
+            packed = pack_padded_sequence(out, lens, batch_first=True, enforce_sorted=False)
+            packed_out, _ = self.lstm(packed)
+            out, _ = pad_packed_sequence(packed_out, batch_first=True, total_length=T)
+        else:
+            out, _ = self.lstm(out)              # [B, T, lstm_hidden]
         out = self.dropout(out)
         logits = self.classifier(out)            # [B, T, num_classes]
         return logits

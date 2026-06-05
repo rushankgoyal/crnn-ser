@@ -31,6 +31,9 @@ Output:
 
 import torch
 import torch.nn as nn
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+
+from models import make_norm
 
 
 class SharanCRNN(nn.Module):
@@ -43,6 +46,7 @@ class SharanCRNN(nn.Module):
         lstm_layers: int = 1,
         bidirectional: bool = True,
         dropout: float = 0.3,
+        norm: str = "layernorm",           # 'layernorm' (batch-independent) | 'batchnorm'
         n_time_pools: int = 3,             # how many MaxPool layers pool the time axis
         verbose: bool = False,
     ):
@@ -64,7 +68,7 @@ class SharanCRNN(nn.Module):
             pool_kernel = (2, time_pool)
             blocks += [
                 nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1),
-                nn.BatchNorm2d(out_ch),
+                make_norm(norm, out_ch),
                 nn.ReLU(inplace=True),
                 nn.MaxPool2d(kernel_size=pool_kernel),
                 nn.Dropout2d(p=0.1),
@@ -94,12 +98,27 @@ class SharanCRNN(nn.Module):
             print(f"[SharanCRNN] total params={total:,}  freq_out={freq_out}  "
                   f"lstm_input={lstm_input_size}  bidirectional={bidirectional}")
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B, 1, n_mels, T]
+    def output_lengths(self, lengths: torch.Tensor) -> torch.Tensor:
+        """Map input-frame lengths to output (post-pool, LSTM-time) lengths. The
+        first n_time_pools blocks each halve the time axis (floor), so the valid
+        length is floor(length / 2**n_time_pools)."""
+        return torch.div(lengths, 2 ** self.n_time_pools,
+                         rounding_mode="floor").clamp(min=1)
+
+    def forward(self, x: torch.Tensor, lengths: torch.Tensor = None) -> torch.Tensor:
+        # x: [B, 1, n_mels, T].  lengths: optional [B] valid input-frame counts.
         out = self.cnn(x)                         # [B, C, F', T']
-        B, C, F, T = out.shape
-        out = out.permute(0, 3, 1, 2).reshape(B, T, C * F)  # [B, T', C*F]
-        out, _ = self.lstm(out)                   # [B, T', H or 2H]
+        B, C, T_out = out.shape[0], out.shape[1], out.shape[3]
+        F = out.shape[2]
+        out = out.permute(0, 3, 1, 2).reshape(B, T_out, C * F)  # [B, T', C*F]
+
+        if lengths is not None:
+            lens = self.output_lengths(lengths).detach().to("cpu", torch.int64).clamp(min=1, max=T_out)
+            packed = pack_padded_sequence(out, lens, batch_first=True, enforce_sorted=False)
+            packed_out, _ = self.lstm(packed)
+            out, _ = pad_packed_sequence(packed_out, batch_first=True, total_length=T_out)
+        else:
+            out, _ = self.lstm(out)               # [B, T', H or 2H]
         out = self.dropout(out)
         logits = self.classifier(out)             # [B, T', num_classes]
         return logits

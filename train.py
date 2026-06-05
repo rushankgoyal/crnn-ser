@@ -45,6 +45,7 @@ def build_model(cfg: dict):
             lstm_layers=m.get("lstm_layers", 1),
             bidirectional=m.get("bidirectional", True),
             dropout=m.get("dropout", 0.3),
+            norm=m.get("norm", "layernorm"),
             n_time_pools=m.get("n_time_pools", 3),
             verbose=m.get("verbose", False),
         )
@@ -59,6 +60,7 @@ def build_model(cfg: dict):
         lstm_layers=m.get("lstm_layers", 1),
         bidirectional=m.get("bidirectional", False),
         dropout=m.get("dropout", 0.3),
+        norm=m.get("norm", "layernorm"),
         n_mels=cfg.get("n_mels", 128),
         # Component B
         use_freq_pos=m.get("use_freq_pos", False),
@@ -81,51 +83,83 @@ def build_model(cfg: dict):
     )
 
 
+def pad_collate(batch):
+    """Collate variable-length clips into a padded batch.
+
+    Each item is (spec [1, F, T_i], label scalar). Returns:
+        specs   : [B, 1, F, T_max]  (zero-padded along time)
+        labels  : [B]
+        lengths : [B]  valid time-frame count per clip (for masking / LSTM packing)
+    Padding with zeros is benign: features are per-bin standardized, so 0 ~ the
+    per-bin mean. Padded frames are excluded from the loss, metrics, and the LSTM.
+    """
+    specs, labels = zip(*batch)
+    lengths = torch.tensor([s.shape[-1] for s in specs], dtype=torch.long)
+    B, F_bins, T_max = len(specs), specs[0].shape[1], int(lengths.max())
+    out = torch.zeros(B, 1, F_bins, T_max, dtype=specs[0].dtype)
+    for i, s in enumerate(specs):
+        out[i, :, :, : s.shape[-1]] = s
+    return out, torch.stack(labels), lengths
+
+
 def spec_augment(spec: torch.Tensor, cfg: dict) -> torch.Tensor:
-    """Apply SpecAugment (freq + time masking) to a single spectrogram [1, 1, F, T]."""
-    F_bins = spec.shape[2]
-    T_bins = spec.shape[3]
+    """Apply SpecAugment (freq + time masking) to a batch [B, 1, F, T], with
+    independent masks drawn per example."""
+    B, _, F_bins, T_bins = spec.shape
     freq_mask_max = cfg.get("freq_mask_max", 20)
     time_mask_max = cfg.get("time_mask_max", 50)
     n_freq = cfg.get("n_freq_masks", 2)
     n_time = cfg.get("n_time_masks", 2)
 
     out = spec.clone()
-    for _ in range(n_freq):
-        f = torch.randint(0, freq_mask_max + 1, (1,)).item()
-        f0 = torch.randint(0, max(1, F_bins - f), (1,)).item()
-        out[:, :, f0:f0 + f, :] = 0.0
-    for _ in range(n_time):
-        t = torch.randint(0, min(time_mask_max + 1, T_bins), (1,)).item()
-        t0 = torch.randint(0, max(1, T_bins - t), (1,)).item()
-        out[:, :, :, t0:t0 + t] = 0.0
+    for b in range(B):
+        for _ in range(n_freq):
+            f = torch.randint(0, freq_mask_max + 1, (1,)).item()
+            f0 = torch.randint(0, max(1, F_bins - f), (1,)).item()
+            out[b, :, f0:f0 + f, :] = 0.0
+        for _ in range(n_time):
+            t = torch.randint(0, min(time_mask_max + 1, T_bins), (1,)).item()
+            t0 = torch.randint(0, max(1, T_bins - t), (1,)).item()
+            out[b, :, :, t0:t0 + t] = 0.0
     return out
 
 
 def run_epoch(model, loader, optimizer, device, train: bool, augment_cfg: dict = None,
               loss_mode: str = "per_frame", label_smoothing: float = 0.1):
-    """loss_mode='per_frame' applies CE at every frame (our proposed setup).
-       loss_mode='last_frame' applies CE only at the final frame (baseline)."""
+    """Batched epoch with padding-aware loss/metrics.
+
+    loss_mode='per_frame' applies CE at every *valid* frame (our proposed setup);
+    loss_mode='last_frame' applies CE only at each clip's last valid frame.
+    Padded frames never contribute to the loss, the UAR, or the LSTM (packed)."""
     assert loss_mode in ("per_frame", "last_frame"), f"bad loss_mode {loss_mode!r}"
     model.train(train)
     total_loss = 0.0
     all_preds, all_labels = [], []
 
-    for spec, label in tqdm(loader, leave=False):
-        spec = spec.to(device)    # [1, 1, 128, T]
-        label = label.to(device)  # [1]
+    for spec, label, lengths in tqdm(loader, leave=False):
+        spec = spec.to(device)        # [B, 1, F, T]
+        label = label.to(device)      # [B]
 
         if train and augment_cfg:
             spec = spec_augment(spec, augment_cfg)
 
-        logits = model(spec).squeeze(0)   # [T, C]
-        T = logits.shape[0]
+        logits = model(spec, lengths)             # [B, T_out, C]
+        B, T_out, C = logits.shape
+        out_lens = model.output_lengths(lengths).to(device).clamp(min=1, max=T_out)  # [B]
+        last_idx = out_lens - 1                                       # [B]
+        last_logits = logits[torch.arange(B, device=device), last_idx]  # [B, C] (last valid frame)
 
         if loss_mode == "per_frame":
-            targets = label.expand(T)
-            loss = F.cross_entropy(logits, targets, label_smoothing=label_smoothing)
+            frame_idx = torch.arange(T_out, device=device).unsqueeze(0)   # [1, T_out]
+            mask = frame_idx < out_lens.unsqueeze(1)                      # [B, T_out]
+            ce = F.cross_entropy(
+                logits.reshape(B * T_out, C),
+                label.unsqueeze(1).expand(B, T_out).reshape(B * T_out),
+                label_smoothing=label_smoothing, reduction="none",
+            ).reshape(B, T_out)
+            loss = (ce * mask).sum() / mask.sum().clamp(min=1)
         else:  # last_frame
-            loss = F.cross_entropy(logits[-1:].view(1, -1), label, label_smoothing=label_smoothing)
+            loss = F.cross_entropy(last_logits, label, label_smoothing=label_smoothing)
 
         if train:
             optimizer.zero_grad()
@@ -134,9 +168,8 @@ def run_epoch(model, loader, optimizer, device, train: bool, augment_cfg: dict =
             optimizer.step()
 
         total_loss += loss.item()
-        pred = logits[-1].argmax().item()  # final-frame prediction for UAR
-        all_preds.append(pred)
-        all_labels.append(label.item())
+        all_preds.extend(last_logits.argmax(dim=1).tolist())  # last-valid-frame prediction
+        all_labels.extend(label.tolist())
 
     avg_loss = total_loss / len(loader)
     uar = unweighted_avg_recall(np.array(all_labels), np.array(all_preds))
@@ -158,9 +191,14 @@ def train(cfg_path: str):
     train_set = SERDataset(os.path.join(data_root, "train.npz"))
     val_set = SERDataset(os.path.join(data_root, "val.npz"))
 
-    # batch_size=1 — clips have variable T, no padding needed
-    train_loader = DataLoader(train_set, batch_size=1, shuffle=True)
-    val_loader = DataLoader(val_set, batch_size=1, shuffle=False)
+    # Batched training with padding (paper §3.4: batch size 32, padded to longest
+    # clip). pad_collate masks padding out of the loss/metrics/LSTM.
+    batch_size = t_cfg.get("batch_size", 32)
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,
+                              collate_fn=pad_collate)
+    val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False,
+                            collate_fn=pad_collate)
+    print(f"Batch size: {batch_size}")
 
     model = build_model(cfg).to(device)
     total_params = sum(p.numel() for p in model.parameters())

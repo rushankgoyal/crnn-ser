@@ -18,11 +18,13 @@ model:
   kernel_freq: 3
   kernel_time: 3
   freq_stride: 2
-  lstm_hidden: 64
+  lstm_hidden: 128
   lstm_layers: 1
   bidirectional: false
-  dropout: 0.5
+  dropout: 0.3
+  norm: layernorm
 train:
+  batch_size: 32
   epochs: 50
   lr: 0.001
   weight_decay: 0.0001

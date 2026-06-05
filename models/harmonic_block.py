@@ -17,6 +17,8 @@ import math
 import torch
 import torch.nn as nn
 
+from models import make_norm
+
 
 def compute_harmonic_dilations(
     n_mels: int = 128,
@@ -125,6 +127,7 @@ class HarmonicDilatedBlock(nn.Module):
         out_ch: int,
         dilations=(1, 2, 4, 8),
         kernel_h: int = 3,
+        norm: str = "layernorm",
         verbose: bool = False,
     ):
         super().__init__()
@@ -151,7 +154,7 @@ class HarmonicDilatedBlock(nn.Module):
 
         self.fuse = nn.Sequential(
             nn.Conv2d(out_ch, out_ch, kernel_size=1, bias=False),
-            nn.BatchNorm2d(out_ch),
+            make_norm(norm, out_ch),
             nn.ReLU(inplace=True),
         )
 

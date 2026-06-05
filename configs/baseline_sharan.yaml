@@ -19,10 +19,12 @@ model:
   lstm_layers: 1
   bidirectional: true
   dropout: 0.3
+  norm: layernorm
   n_time_pools: 3   # pool time 2x for first 3 conv blocks → T // 8 frames
 train:
+  batch_size: 32
   epochs: 50
-  lr: 0.0005
+  lr: 0.001
   weight_decay: 0.0001
   val_fraction: 0.1
   test_fraction: 0.1
