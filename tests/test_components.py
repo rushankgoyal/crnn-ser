@@ -21,6 +21,7 @@ except ImportError:
 from models.harmonic_block import HarmonicDilatedBlock, compute_harmonic_dilations
 from models.freq_pos import FrequencyPositionalConditioning
 from models.crnn import AnisotropicCRNN
+from models.sharan import SharanCRNN
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +239,62 @@ def test_crnn_all_off_equals_baseline():
     )
 
 
+# ---------------------------------------------------------------------------
+# Baseline variants — 3×3 square kernel, BiLSTM, Sharan
+# ---------------------------------------------------------------------------
+
+def test_crnn_square_kernel_3x3_shape():
+    """3×3 kernel with freq_stride=2 should halve freq per layer (128→64→32→16→8)
+       and preserve T thanks to same-padding on time."""
+    model = AnisotropicCRNN(kernel_freq=3, kernel_time=3, freq_stride=2)
+    out = model(_make_input(T=50))
+    assert out.shape == (1, 50, 4), f"got {out.shape}"
+
+
+def test_crnn_square_kernel_backward():
+    model = AnisotropicCRNN(kernel_freq=3, kernel_time=3, freq_stride=2)
+    x = torch.randn(1, 1, 128, 40)
+    out = model(x)
+    out.sum().backward()
+    for name, p in model.named_parameters():
+        assert p.grad is not None, f"No grad for {name}"
+
+
+def test_crnn_bidirectional_shape():
+    """BiLSTM variant must still produce (B, T, C) and have a 2H -> C head."""
+    model = AnisotropicCRNN(bidirectional=True, lstm_hidden=64)
+    out = model(_make_input(T=50))
+    assert out.shape == (1, 50, 4)
+    # classifier in_features should be 2 * lstm_hidden
+    assert model.classifier.in_features == 128, model.classifier.in_features
+
+
+def test_crnn_bidirectional_param_count_grows():
+    uni = AnisotropicCRNN(bidirectional=False, lstm_hidden=64)
+    bi  = AnisotropicCRNN(bidirectional=True,  lstm_hidden=64)
+    n_uni = sum(p.numel() for p in uni.parameters())
+    n_bi  = sum(p.numel() for p in bi.parameters())
+    assert n_bi > n_uni, f"BiLSTM should have more params: {n_uni} vs {n_bi}"
+
+
+def test_sharan_shape():
+    """Sharan baseline returns per-frame logits at a pooled time resolution."""
+    model = SharanCRNN(num_classes=4, n_time_pools=3)
+    x = torch.randn(1, 1, 128, 80)  # T=80 → after 3 time-pools → T'=10
+    out = model(x)
+    assert out.shape[0] == 1 and out.shape[2] == 4
+    assert out.shape[1] == 80 // 8, f"expected T'=10, got {out.shape[1]}"
+
+
+def test_sharan_backward():
+    model = SharanCRNN()
+    x = torch.randn(1, 1, 128, 80)
+    out = model(x)
+    out.sum().backward()
+    for name, p in model.named_parameters():
+        assert p.grad is not None, f"No grad for {name}"
+
+
 def test_crnn_backward_both():
     model = AnisotropicCRNN(
         use_harmonic_block=True, harmonic_out_ch=8,
@@ -248,6 +305,68 @@ def test_crnn_backward_both():
     out.sum().backward()
     for name, p in model.named_parameters():
         assert p.grad is not None, f"No grad for {name}"
+
+
+# ---------------------------------------------------------------------------
+# Batched / padded training path (paper §3.4: batch 32, padded to longest clip)
+# ---------------------------------------------------------------------------
+
+def test_batched_forward_with_lengths():
+    """Length-aware forward returns per-frame logits for a padded batch."""
+    model = AnisotropicCRNN(lstm_hidden=64)
+    x = torch.randn(3, 1, 128, 50)
+    lengths = torch.tensor([20, 35, 50])
+    out = model(x, lengths)
+    assert out.shape == (3, 50, 4), out.shape
+
+
+def test_crnn_padding_invariant():
+    """The frequency-first CRNN never mixes time, so a clip's last-valid-frame
+    output must NOT depend on how it is zero-padded in a batch."""
+    model = AnisotropicCRNN(lstm_hidden=64).eval()
+    short = torch.randn(1, 1, 128, 37)
+    with torch.no_grad():
+        solo = model(short)
+        L = model.output_lengths(torch.tensor([37]))[0].item()
+        batch = torch.zeros(2, 1, 128, 80)
+        batch[0, :, :, :37] = short[0]
+        batch[1] = torch.randn(1, 128, 80)
+        padded = model(batch, torch.tensor([37, 80]))
+    diff = (solo[0, L - 1] - padded[0, L - 1]).abs().max().item()
+    assert diff < 1e-4, f"padding changed the result: {diff}"
+
+
+def test_masked_run_epoch_decreases_loss():
+    """run_epoch with padding masks should train (loss decreases) for both modes."""
+    from train import pad_collate, run_epoch
+    from torch.utils.data import Dataset, DataLoader
+
+    class _Fake(Dataset):
+        def __init__(self, n=24):
+            g = torch.Generator().manual_seed(0)
+            self.it = [(torch.randn(1, 128, int(torch.randint(20, 60, (1,), generator=g))),
+                        torch.randint(0, 4, (1,), generator=g)[0]) for _ in range(n)]
+        def __len__(self): return len(self.it)
+        def __getitem__(self, i): return self.it[i]
+
+    loader = DataLoader(_Fake(), batch_size=8, shuffle=True, collate_fn=pad_collate)
+    for mode, m in [("per_frame", AnisotropicCRNN(lstm_hidden=64)),
+                    ("last_frame", SharanCRNN(n_time_pools=3))]:
+        opt = torch.optim.Adam(m.parameters(), lr=1e-3)
+        l0, _ = run_epoch(m, loader, opt, "cpu", train=True, loss_mode=mode)
+        for _ in range(8):
+            run_epoch(m, loader, opt, "cpu", train=True, loss_mode=mode)
+        l1, _ = run_epoch(m, loader, opt, "cpu", train=False, loss_mode=mode)
+        assert l1 < l0, f"{mode}: loss did not decrease ({l0:.3f} -> {l1:.3f})"
+
+
+def test_norm_param_count_unchanged():
+    """LayerNorm (default) keeps the same param count as the BatchNorm variant."""
+    ln = AnisotropicCRNN(norm="layernorm")
+    bn = AnisotropicCRNN(norm="batchnorm")
+    n_ln = sum(p.numel() for p in ln.parameters())
+    n_bn = sum(p.numel() for p in bn.parameters())
+    assert n_ln == n_bn, f"param count differs: layernorm={n_ln} batchnorm={n_bn}"
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +395,17 @@ if __name__ == "__main__":
         test_crnn_empirical_dilation_mode,
         test_crnn_first_conv_in_ch_bumped,
         test_crnn_all_off_equals_baseline,
+        test_crnn_square_kernel_3x3_shape,
+        test_crnn_square_kernel_backward,
+        test_crnn_bidirectional_shape,
+        test_crnn_bidirectional_param_count_grows,
+        test_sharan_shape,
+        test_sharan_backward,
         test_crnn_backward_both,
+        test_batched_forward_with_lengths,
+        test_crnn_padding_invariant,
+        test_masked_run_epoch_decreases_loss,
+        test_norm_param_count_unchanged,
     ]
 
     class _FakeCapsys:

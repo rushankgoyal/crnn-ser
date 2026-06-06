@@ -43,6 +43,17 @@ def evaluate(cfg_path: str, checkpoint_path: str):
     model.load_state_dict(ckpt["model_state"])
     model.eval()
 
+    # Detect temporal downsampling (e.g. Sharan pools 8x). Lets the latency curve
+    # x-axis stay in real-time milliseconds regardless of model.
+    hop_ms = cfg.get("hop_length_ms", 10.0)
+    n_mels = cfg.get("n_mels", 128)
+    with torch.no_grad():
+        probe = torch.zeros(1, 1, n_mels, 64, device=device)
+        probe_out = model(probe)
+    temporal_ratio = 64.0 / probe_out.shape[1]
+    effective_hop_ms = float(hop_ms * temporal_ratio)
+    print(f"Effective hop: {effective_hop_ms:.1f} ms/frame  (model T-ratio = {temporal_ratio:.2f})")
+
     test_set = SERDataset(os.path.join(data_root, "test.npz"))
     test_loader = DataLoader(test_set, batch_size=1, shuffle=False)
 
@@ -99,17 +110,20 @@ def evaluate(cfg_path: str, checkpoint_path: str):
         "confusion_matrix": cm.tolist(),
         "first_correct_frame_stats": fc_stats,
         "latency_curve": curve.tolist(),   # saved for cross-variant comparison plots
+        "effective_hop_ms": effective_hop_ms,
     }
     with open(os.path.join(results_dir, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
     print(f"\nSaved metrics → results/{run_name}/metrics.json")
 
     # Plot latency-accuracy curve
-    _plot_latency_curve(curve, all_logits, all_labels, emotions, results_dir, cfg, run_name)
+    _plot_latency_curve(curve, all_logits, all_labels, emotions, results_dir, cfg,
+                        run_name, effective_hop_ms)
 
 
-def _plot_latency_curve(curve, all_logits, all_labels, emotions, results_dir, cfg, run_name=""):
-    hop_ms = cfg.get("hop_length_ms", 10.0)
+def _plot_latency_curve(curve, all_logits, all_labels, emotions, results_dir, cfg,
+                        run_name="", effective_hop_ms: float = None):
+    hop_ms = effective_hop_ms if effective_hop_ms is not None else cfg.get("hop_length_ms", 10.0)
     frames = np.arange(len(curve))
     time_ms = frames * hop_ms
 

@@ -1,6 +1,6 @@
-dataset: ravdess
-run_name: ravdess_harmonic_freqpos
-data_root: data/processed/ravdess
+dataset: msp_improv
+run_name: msp_harmonic_freqpos
+data_root: data/processed/msp_improv
 num_classes: 4
 emotions: [happy, sad, angry, neutral]
 sample_rate: 16000
@@ -12,29 +12,27 @@ model:
   kernel_freq: 32
   lstm_hidden: 128
   lstm_layers: 1
-  dropout: 0.3
-  norm: layernorm
+  dropout: 0.5
   # Component A — HarmonicDilatedBlock
   use_harmonic_block: true
   harmonic_out_ch: 8
-  dilation_mode: octave   # or empirical
+  dilation_mode: octave
   dilations: [1, 2, 4, 8]
   kernel_h: 3
   # Component B — FrequencyPositionalConditioning
   use_freq_pos: true
-  freq_pos_mode: concat   # or film
+  freq_pos_mode: concat
   pos_dim: 1
-  pos_init: learned       # or sinusoidal, linear_ramp
+  pos_init: learned
   verbose: false
 train:
-  batch_size: 32
   epochs: 50
   lr: 0.001
-  weight_decay: 0.0001
+  weight_decay: 0.001
   val_fraction: 0.1
   test_fraction: 0.1
 augment:
-  freq_mask_max: 27
-  time_mask_max: 80
+  freq_mask_max: 20
+  time_mask_max: 50
   n_freq_masks: 2
   n_time_masks: 2
