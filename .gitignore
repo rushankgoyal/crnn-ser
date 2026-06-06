@@ -10,3 +10,6 @@ results/
 *.pth
 *.npz
 .ipynb_checkpoints/
+
+# Internal working notes (kept out of the published repo)
+CLAUDE.md

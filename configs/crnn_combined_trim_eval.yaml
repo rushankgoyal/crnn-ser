@@ -1,6 +1,6 @@
-dataset: ravdess
-run_name: ravdess_baseline
-data_root: data/processed/ravdess
+dataset: combined_trim
+run_name: combined_trim_layer_b32_aug_test
+data_root: data/processed/combined_trim
 num_classes: 4
 emotions: [happy, sad, angry, neutral]
 sample_rate: 16000
@@ -13,9 +13,17 @@ model:
   lstm_hidden: 128
   lstm_layers: 1
   dropout: 0.3
+  norm: layer
 train:
   epochs: 50
   lr: 0.001
   weight_decay: 0.0001
   val_fraction: 0.1
   test_fraction: 0.1
+augment:
+  enabled: false
+  n_freq_masks: 2
+  freq_mask_param: 15
+  n_time_masks: 2
+  time_mask_param: 25
+  time_mask_p: 0.2

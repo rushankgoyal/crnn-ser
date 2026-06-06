@@ -1,5 +1,5 @@
 dataset: ravdess
-run_name: ravdess_baseline
+run_name: ravdess_harmonic
 data_root: data/processed/ravdess
 num_classes: 4
 emotions: [happy, sad, angry, neutral]
@@ -13,6 +13,12 @@ model:
   lstm_hidden: 128
   lstm_layers: 1
   dropout: 0.3
+  use_harmonic_block: true
+  harmonic_out_ch: 8
+  dilation_mode: octave   # or empirical
+  dilations: [1, 2, 4, 8]
+  kernel_h: 3
+  use_freq_pos: false
 train:
   epochs: 50
   lr: 0.001

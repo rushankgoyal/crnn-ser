@@ -1,5 +1,5 @@
 dataset: ravdess
-run_name: ravdess_baseline
+run_name: ravdess_ln
 data_root: data/processed/ravdess
 num_classes: 4
 emotions: [happy, sad, angry, neutral]
@@ -13,9 +13,18 @@ model:
   lstm_hidden: 128
   lstm_layers: 1
   dropout: 0.3
+  norm: layer
 train:
   epochs: 50
   lr: 0.001
   weight_decay: 0.0001
   val_fraction: 0.1
   test_fraction: 0.1
+# SpecAugment (train only). Set enabled: true to turn on.
+augment:
+  enabled: false
+  n_freq_masks: 2
+  freq_mask_param: 15
+  n_time_masks: 2
+  time_mask_param: 25
+  time_mask_p: 0.2
