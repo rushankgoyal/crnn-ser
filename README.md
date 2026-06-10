@@ -1,10 +1,11 @@
-# CS231N — Time-Efficient Speech Emotion Recognition
+# CS231N: Time-Efficient Speech Emotion Recognition
+## Rushank Goyal and Jaanak Prashar
 
-Unidirectional CRNN with frequency-first anisotropic kernels for sub-utterance SER.
+Unidirectional CRNN with frequency-first anisotropic kernels for streaming SER.
 
 ## Architecture
 
-A 4-layer CNN with `(32×1)` kernels (frequency-axis only, no time context) reduces the input from 128 mel bins down to 4 via valid convolution: `128→97→66→35→4`. The resulting `4×64 = 256`-dim feature vector per time step feeds a unidirectional LSTM, which outputs a 4-class prediction at every frame. Training applies cross-entropy loss at every frame, directly optimizing for early commitment.
+A 4-layer CNN with `(32×1)` kernels (frequency-axis only) reduces the input from 128 mel bins down to 4 via valid convolution: `128→97→66→35→4`. The resulting `4×64 = 256`-dim feature vector per time step feeds a unidirectional LSTM, which outputs a 4-class prediction at every frame. Training applies cross-entropy loss at every frame, directly optimizing for early commitment.
 
 ### Ablation variants
 
