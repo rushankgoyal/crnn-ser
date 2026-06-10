@@ -6,17 +6,6 @@ Unidirectional CRNN with frequency-first anisotropic kernels for sub-utterance S
 
 A 4-layer CNN with `(32×1)` kernels (frequency-axis only, no time context) reduces the input from 128 mel bins down to 4 via valid convolution: `128→97→66→35→4`. The resulting `4×64 = 256`-dim feature vector per time step feeds a unidirectional LSTM, which outputs a 4-class prediction at every frame. Training applies cross-entropy loss at every frame, directly optimizing for early commitment.
 
-```
-Input [1, 128, T]
-  → (opt) FreqPos concat          [1+P, 128, T]
-  → (opt) HarmonicDilatedBlock    [harm_ch, 128, T]
-  → (opt) FreqPos film            [harm_ch, 128, T]
-  → 4× Conv(32×1) + BN + ReLU    [64, 4, T]
-  → Flatten freq → permute        [T, 256]
-  → Unidirectional LSTM(256→128)  [T, 128]
-  → Linear(128→4)                 [T, 4]  ← prediction at every frame
-```
-
 ### Ablation variants
 
 | Variant | Config | Params |
