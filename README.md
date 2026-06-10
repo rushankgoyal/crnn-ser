@@ -1,5 +1,5 @@
 # CS231N: Time-Efficient Speech Emotion Recognition
-## Rushank Goyal and Jaanak Prashar
+### Rushank Goyal and Jaanak Prashar
 
 Unidirectional CRNN with frequency-first anisotropic kernels for streaming SER.
 
